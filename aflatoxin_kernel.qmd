@@ -1,0 +1,453 @@
+---
+title: "Application of Machine Learning for Aflatoxin Detection in Corn Kernels Utilizing Open Source Datasets"
+author: "Dedy Leonardo Nadeak"
+format:
+  revealjs:
+    embed-resources: true
+    transition: slide
+    theme: simple
+    slide-number: true
+    scrollable: true
+editor: visual
+---
+
+## Acknowlegment
+
+<p style="font-size: 18px;"> Thank you for Chloe Siegel for allowing public to access the raw data.</p>
+![](code/cover.jpg){fig-align="center"}<small>DOI: 10.1016/j.foodcont.2023.109953, <https://github.com/ChloeSiegel/kerneldata></small>
+
+## Background
+<div style="font-size: 30px;">
+-   In this project, I aim to apply several machine learning techniques for binary classification using aflatoxin-contaminated corn kernel datasets. The algorithms I'll explore are Partial Least Square Discriminant Analysis (PLS-DA), Random Forest (RF), Support Vector Machine (SVM), and Gradient Boosting Machine (GBM).
+
+-   Separation high (HC) and low (LC) level aflatoxin contamination based on SNI 01-3929-2006, which the maximum level of aflatoxin for poultry feed in Indonesia is 50 ppb.
+
+-   For this analysis, I focus exclusively on the SC212M x PHW79 corn hybrid. This dataset comprises 247 samples, with 107 classified as HC and 140 as LC.
+</div>
+## Importing the dataset and remove the unused data.
+
+```{r}
+setwd("C:/Users/leonadeak18/Desktop/PhD/Self Learning/Project/Aflatoxin_kernel")
+```
+
+```{r}
+#| echo: true
+#| fig-align: center
+#| output-location: fragment
+#| code-line-numbers: "1-5|7-13|15-16"
+
+#import the datasets
+aflatoxin_data <- read.csv("kernel_data/spectralsignatures.csv", header = T)
+
+#select the "SC212M x PHW79" samples
+df <- subset(aflatoxin_data, aflatoxin_data$Hybrid == "SC212M x PHW79")
+
+#Create a reference, and split as high and low contaminant 
+AF_ref <- df[,c(1,3)]
+AF_ref$contaminant <- ifelse(AF_ref$AF_level <= 50, "LC", "HC")
+AF_ref$contaminant <- as.factor(AF_ref$contaminant)
+
+#remove the second to forth columns
+df <- df[,-c(2:4)]
+
+#remove "stray light", which can introduce unwanted noise. Remove first 50 and last 50 wavenumber
+df <- df[,-c(2:51, (ncol(df)-49):ncol(df))]
+
+```
+
+## Plot the original data
+
+```{r}
+#Plotting data
+plotting <- function(input, mytitle=""){
+  #Create a long table
+  library(tidyverse)
+  df_long <- input %>% pivot_longer(cols = starts_with("X"), names_to = "wavelength", values_to = "intensity")
+  
+  #remove the 'X' from the wavelength and convert to numeric
+  df_long <- df_long %>% mutate(wavelength = as.numeric(sub("^X","", wavelength)))
+  df_long$kernel_number <- as.factor(df_long$kernel_number)
+  
+  library(ggplot2)
+  df_plot <- ggplot(df_long, aes(x = wavelength, y = intensity, color = kernel_number)) +
+  geom_line() +
+  labs(title = mytitle, x = "Wavelength", y = "Intensity") +
+  theme_classic() +
+  theme(legend.position = "none")
+  
+return(df_plot)
+}
+
+
+plot_ori <- plotting(df, mytitle = "Original Spectra")
+print(plot_ori)
+ggsave("processed_data/Original.png", plot = plot_ori, width = 8, height = 4)
+```
+
+## Preprocessing data
+
+```{r}
+#SNV preprocessing data
+library(prospectr)
+library(dplyr)
+df_snv <- as.data.frame(standardNormalVariate(X = df[,-1]))
+df_snv <- cbind(df$kernel_number, df_snv)
+df_snv <- df_snv %>% rename(kernel_number = "df$kernel_number")
+
+#MSC preprocessing data
+df_msc <- as.data.frame(msc(X = df[,-1], ref_spectrum = colMeans(df[,-1])))
+df_msc <- cbind(df$kernel_number, df_msc)
+df_msc <- df_msc %>% rename(kernel_number = "df$kernel_number")
+
+#EMSC preprocessing data
+library(EMSC)
+#apply second polynomial
+matrix_emsc <- as.matrix(df[,-1])
+colnames(matrix_emsc) <- gsub("^X", "", colnames(matrix_emsc))
+mat_emsc <- EMSC(matrix_emsc, degree = 3)
+df_emsc <- as.data.frame(cbind(df$kernel_number, mat_emsc$corrected))
+names(df_emsc)[-1] <- paste0("X", names(df_emsc)[-1])
+df_emsc <- df_emsc %>% rename(kernel_number = "V1")
+
+#Detrend with second order polynomial preprocessing data
+df_detrend <- as.data.frame(detrend(X = df[,-1], wav = as.numeric(colnames(matrix_emsc))))
+df_detrend <- cbind(df$kernel_number, df_detrend)
+df_detrend <- df_detrend %>% rename(kernel_number = "df$kernel_number")
+
+#First derivative
+df_d1 <- as.data.frame(savitzkyGolay(df_snv[,-1], p = 3, w = 11, m = 1))
+df_d1 <- cbind(df$kernel_number, df_d1)
+df_d1 <- df_d1 %>% rename(kernel_number = "df$kernel_number")
+
+#second derivative
+df_d2 <- as.data.frame(savitzkyGolay(df_snv[,-1], p = 3, w = 11, m = 2))
+df_d2 <- cbind(df$kernel_number, df_d2)
+df_d2 <- df_d2 %>% rename(kernel_number = "df$kernel_number")
+```
+
+```{r}
+library(ggpubr)
+
+#Plotting all dataframes
+plot_snv <- plotting(df_snv, mytitle = "SNV Preprocessing")
+plot_msc <- plotting(df_msc, mytitle = "MSC Preprocessing")
+plot_emsc <- plotting(df_emsc, mytitle = "EMSC Preprocessing")
+plot_detrend <- plotting(df_detrend, mytitle = "Detrend Preprocessing")
+plot_d1 <- plotting(df_d1, mytitle = "First Derivative Preprocessing")
+plot_d2 <- plotting(df_d2, mytitle = "Second Derivative Preprocessing")
+
+#Arrange the plots
+combine_plot <- ggarrange(plot_ori, plot_snv, plot_msc, plot_emsc, plot_detrend, plot_d1, plot_d2, ncol = 2, nrow = 4)
+print(combine_plot)
+ggsave("processed_data/Preprocessing.png", plot = combine_plot, width = 20, height = 10)
+```
+
+## Train and Test Dataset
+
+```{r}
+#| echo: true
+#| fig-align: center
+#| output-location: fragment
+#| code-line-numbers: "1-4|6-12"
+#Split datasets using the Kennard-Stone (KS) algorithm
+library(caTools)
+set.seed(123)
+spl <- sample.split(df$kernel_number, SplitRatio = 0.8)
+
+#reference aflatoxin
+AF_ref_train <- subset(AF_ref, spl == TRUE)
+AF_ref_test <- subset(AF_ref, spl == FALSE)
+
+#SNV
+df_snv_train <- subset(df_snv, spl == TRUE)
+df_snv_test <- subset(df_snv, spl == FALSE)
+```
+
+```{r}
+#MSC
+df_msc_train <- subset(df_msc, spl == TRUE)
+df_msc_test <- subset(df_msc, spl == FALSE)
+
+#EMSC
+df_emsc_train <- subset(df_emsc, spl == TRUE)
+df_emsc_test <- subset(df_emsc, spl == FALSE)
+
+#Detrend
+df_detrend_train <- subset(df_detrend, spl == TRUE)
+df_detrend_test <- subset(df_detrend, spl == FALSE)
+
+#First Derivative
+df_d1_train <- subset(df_d1, spl == TRUE)
+df_d1_test <- subset(df_d1, spl == FALSE)
+
+#Second Derivative
+df_d2_train <- subset(df_d2, spl == TRUE)
+df_d2_test <- subset(df_d2, spl == FALSE)
+```
+
+## PLS-DA Determination
+
+```{r}
+#| echo: true
+#| fig-align: center
+#| output-location: fragment
+#| code-line-numbers: "1-4|5-6"
+library(mdatools)
+###First derivative
+plsda_d1 <- plsda(df_d1_train[,-1], AF_ref_train$contaminant, 20, cv=10)
+plsda_d1 <- selectCompNum(plsda_d1, 4)
+pred_plsda_d1 <- predict(plsda_d1, df_d1_test[,-1], AF_ref_test$contaminant)
+print(pred_plsda_d1$misclassified[,4])
+```
+
+Setting:  
+<p style="font-size: 24px;"> First Derivative with 4 number of components </p>
+
+```{r}
+library(mdatools)
+###SNV
+# plsda_snv <- plsda(df_snv_train[,-1], AF_ref_train$contaminant, 20, cv=10)
+# plsda_snv <- selectCompNum(plsda_snv, 10)
+# pred_plsda_snv <- predict(plsda_snv, df_snv_test[,-1], AF_ref_test$contaminant)
+# pred_plsda_snv$misclassified[,10]
+# #summary(pred_plsda_snv)
+# ##vip selection
+# # vip = vipscores(plsda_snv, ncomp = 7)
+# # plotVIPScores(plsda_snv)
+# # plsda_snvvip <- plsda(df_snv_train[,-1], AF_ref_train$contaminant, 7, cv = 10, exclcols = (vip[1] < 1))
+# # plot(plsda_snvvip)
+# # pred_plsda_snv <- predict(plsda_snvvip, df_snv_test[,-1], AF_ref_test$contaminant)
+# # summary(pred_plsda_snv)
+# 
+# #Second derivative
+# plsda_d2 <- plsda(df_d2_train[,-1], AF_ref_train$contaminant, 20, cv=10)
+# pred_plsda_d2 <- predict(plsda_d2, df_d2_test[,-1], AF_ref_test$contaminant)
+# #summary(pred_plsda_d2)
+# #vip selection
+# vip = vipscores(plsda_d2, ncomp = 6)
+# #plotVIPScores(plsda_d2)
+# plsda_d1vip <- plsda(df_d2_train[,-1], AF_ref_train$contaminant, 6, cv = 10, exclcols = (vip[1] < 2))
+# #plot(plsda_d1vip)
+# pred_plsda_d1 <- predict(plsda_d1vip, df_d1_test[,-1], AF_ref_test$contaminant)
+# #summary(pred_plsda_d1)
+# 
+# 
+# #MSC
+# plsda_msc <- plsda(df_msc_train[,-1], AF_ref_train$contaminant, 15, cv=10)
+# #plot(plsda_msc)
+# plsda_msc <- selectCompNum(plsda_msc, 6)
+# pred_plsda_msc <- predict(plsda_msc, df_msc_test[,-1], AF_ref_test$contaminant)
+# #summary(pred_plsda_msc)
+# 
+# #EMSC
+# plsda_emsc <- plsda(df_emsc_train[,-1], AF_ref_train$contaminant, 15, cv=10)
+# #plot(plsda_emsc)
+# pred_plsda_emsc <- predict(plsda_emsc, df_emsc_test[,-1], AF_ref_test$contaminant)
+# #summary(pred_plsda_emsc)
+# 
+# #Detrend
+# plsda_detrend <- plsda(df_detrend_train[,-1], AF_ref_train$contaminant, 15, cv=10)
+# #plot(plsda_detrend)
+# plsda_detrend <- selectCompNum(plsda_detrend, 5)
+# pred_plsda_detrend <- predict(plsda_detrend, df_detrend_test[,-1], AF_ref_test$contaminant)
+#summary(pred_plsda_detrend)
+```
+
+## Random Forest Determination
+```{r}
+#| echo: true
+#| fig-align: center
+#| output-location: fragment
+#| code-line-numbers: "1-8|9-11|12-13"
+library(caret)
+library(randomForest)
+#SNV
+#Random Forest with SNV datasets model using Hyperparameter tuning
+rf_snv_train <- cbind(AF_ref_train$contaminant, df_snv_train[,-1])
+names(rf_snv_train)[1] <- "contaminant"
+tune_grid <- expand.grid(.mtry = c(1:10))
+control <- trainControl(method = "cv", number = 10)
+set.seed(123)
+rf_snv_model <- train(contaminant ~ ., data = rf_snv_train, method = "rf", tuneGrid = tune_grid, trControl = control, ntree = 1000, nodesize = 1)
+pred_rf_snv <- predict(rf_snv_model, newdata = df_snv_test[,-1])
+print(table(pred_rf_snv, AF_ref_test$contaminant))
+```
+<div style="font-size: 16px;">
+Setting:  
+SNV Preprocessing  
+Number of tree    : 1000  
+Node Size         : 1  
+Number of variable: 5  
+</div>
+```{r}
+#Optimization using Recursive Feature Elimination (RFE)
+# control <- rfeControl(
+#   functions = rfFuncs,
+#   method = "cv",
+#   number = 10
+# )
+# set.seed(123)
+# rfe_model <- rfe(
+#   rf_snv_train[,-1],
+#   rf_snv_train$contaminant,
+#   sizes = c(1:2),
+#   rfeControl = control
+# )
+# selected_features <- predictors(rfe_model)
+# 
+# rfe_snv_model <- train(
+#   as.formula(paste("contaminant ~", paste(selected_features, collapse = "+"))),
+#   data = rf_snv_train,
+#   method = "rf",
+#   trControl = trainControl(method = "cv", number = 10),
+#   ntree = 500,
+#   nodesize = 5
+# )
+# print(rf_model)
+# pred_rf_snv <- predict(rf_model, newdata = df_snv_test[,-1])
+# table(pred_rf_snv, AF_ref_test$contaminant)
+
+
+
+# #First Derivative
+# rf_d1_train <- cbind(AF_ref_train$contaminant, df_d1_train[,-1])
+# names(rf_d1_train)[1] <- "contaminant"
+# set.seed(123)
+# rf_d1_model <- train(contaminant ~ ., data = rf_d1_train, method = "rf", tuneGrid = tune_grid, trControl = control, ntree = 1000, nodesize = 1)
+# pred_rf_d1 <- predict(rf_d1_model, newdata = df_d1_test[,-1])
+# table(pred_rf_d1, AF_ref_test$contaminant)
+# 
+# 
+# #Second Derivative
+# rf_d2_train <- cbind(AF_ref_train$contaminant, df_d2_train[,-1])
+# names(rf_d2_train)[1] <- "contaminant"
+# rf_d2_model <- train(contaminant ~ ., data = rf_d2_train, method = "rf", tuneGrid = tune_grid, trControl = control, ntree = 1000, nodesize = 1)
+# print(rf_d2_model)
+# pred_rf_d2 <- predict(rf_d2_model, newdata = df_d2_test[,-1])
+# table(pred_rf_d2, AF_ref_test$contaminant)
+```
+
+## Support Vector Machines (SVMs)
+```{r}
+#| echo: true
+#| fig-align: center
+#| output-location: fragment
+#| code-line-numbers: "1-13|14-18|19-20"
+library(caret)
+##SNV model
+#Tuning the model
+trainControl <- trainControl(method = "cv", number = 10)
+
+# Define gamma values
+gamma_values <- c(0.01, 0.1, 0.5, 1, 5, 10, 100)
+
+# Convert gamma values to sigma values
+sigma_values <- 1 / sqrt(2 * gamma_values)
+
+# Define the tuning grid
+tuneGrid <- expand.grid(C = c(0.5, 1, 10, 100, 1000), sigma = sigma_values)
+set.seed(123)
+svm_snv_model <- train(contaminant ~ ., data = rf_snv_train, 
+               method = "svmRadial",
+               trControl = trainControl,
+               tuneGrid = tuneGrid)
+pred_svm_snv <- predict(svm_snv_model, df_snv_test[,-1])
+table(pred_svm_snv, AF_ref_test$contaminant)
+```
+<div style="font-size: 16px;">
+Setting:  
+SNV Preprocessing  
+Gamma   : 0.01  
+Cost    : 0.5  
+</div>
+```{r}
+# #First detivative
+# set.seed(123)
+# svm_d1_model <- train(contaminant ~ ., data = rf_d1_train, 
+#                method = "svmRadial",
+#                trControl = trainControl,
+#                tuneGrid = tuneGrid)
+# print(svm_d1_model)
+# pred_svm_d1 <- predict(svm_d1_model, df_d1_test[,-1])
+# table(pred_svm_d1, AF_ref_test$contaminant)
+# 
+# #Second derivative
+# set.seed(123)
+# svm_d2_model <- train(contaminant ~ ., data = rf_d2_train, 
+#                method = "svmRadial",
+#                trControl = trainControl,
+#                tuneGrid = tuneGrid)
+# print(svm_d2_model)
+# pred_svm_d2 <- predict(svm_d2_model, df_d2_test[,-1])
+# table(pred_svm_d2, AF_ref_test$contaminant)
+```
+
+## Gradien Boosting Machine (GBM)
+```{r}
+#| echo: true
+#| fig-align: center
+#| output-location: fragment
+#| code-line-numbers: "1-12|14-22|23-24"
+library(caret)
+library(gbm)
+# Define the training control
+train_control <- trainControl(method = "cv", number = 10)
+
+# Define the hyperparameter grid
+tune_grid <- expand.grid(
+  n.trees = c(100, 200, 300, 500, 1000),
+  interaction.depth = c(1, 3, 5),
+  shrinkage = c(0.01, 0.1, 0.3),
+  n.minobsinnode = c(10, 20)
+)
+
+#SNV model
+set.seed(123)
+gbm_snv_model <- train(
+  contaminant ~ ., data = rf_snv_train,
+  method = "gbm",
+  trControl = train_control,
+  tuneGrid = tune_grid,
+  verbose = FALSE
+)
+pred_gbm_snv <- predict(gbm_snv_model, df_snv_test[,-1])
+table(pred_gbm_snv, AF_ref_test$contaminant)
+```
+<div style="font-size: 16px;">
+Setting:  
+SNV Preprocessing  
+Number of Trees   : 100  
+Interaction Depth : 5  
+Learning Rate     : 0.3  
+Min. Observation in Node: 20  
+</div>
+```{r}
+# #First derivative
+# set.seed(123)
+# gbm_d1_model <- train(
+#   contaminant ~ ., data = rf_d1_train,
+#   method = "gbm",
+#   trControl = train_control,
+#   tuneGrid = tune_grid,
+#   verbose = FALSE
+# )
+# print(gbm_d1_model)
+# pred_gbm_d1 <- predict(gbm_d1_model, df_d1_test[,-1])
+# table(pred_gbm_d1, AF_ref_test$contaminant)
+# 
+# #Second derivative
+# set.seed(123)
+# gbm_d2_model <- train(
+#   contaminant ~ ., data = rf_d2_train,
+#   method = "gbm",
+#   trControl = train_control,
+#   tuneGrid = tune_grid,
+#   verbose = FALSE
+# )
+# print(gbm_d2_model)
+# pred_gbm_d2 <- predict(gbm_d2_model, df_d2_test[,-1])
+# table(pred_gbm_d2, AF_ref_test$contaminant)
+```
+
+## Conclusion
+![](code/Finalresult.jpg){fig-align="center"}
